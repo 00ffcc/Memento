@@ -30,9 +30,8 @@ colorlog.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 MAX_CTX = 175000
-EXE_MODEL = "o4-mini"
 
-JUDGE_MODEL = "gpt-4o-mini"
+JUDGE_MODEL = os.getenv("JUDGE_MODEL")
 
 PROMPT_TPL = '''You will be given a question and its ground truth answer list where each item can be a ground truth answer. Provided a pred_answer, you need to judge if the pred_answer correctly answers the question based on the ground truth answer list.
 You should first give your rationale for the judgement, and then give your judgement result (i.e., correct or incorrect).
@@ -57,7 +56,8 @@ The output should in the following json format:
 
 query_list: List[str] = []
 ground_truth_map: Dict[str, Any] = {}
-with open("../data/deepresearcher.jsonl", "r") as f:
+TASK = os.getenv("TASK", "deepresearcher")
+with open(f"../data/{TASK}.jsonl", "r") as f:
     for line in f:
         data = json.loads(line)
         q = data['question']
@@ -66,12 +66,12 @@ with open("../data/deepresearcher.jsonl", "r") as f:
 
 server_paths: list[str] = [
     "../server/code_agent.py",
-    "../server/ai_crawl.py",
-    "../server/documents_tool.py",
-    "../server/image_tool.py",
+    # "../server/ai_crawl.py",
+    # "../server/documents_tool.py",
+    # "../server/image_tool.py",
     "../server/math_tool.py",
-    "../server/serp_search.py",
-    "../server/video_tool.py",
+    # "../server/serp_search.py",
+    # "../server/video_tool.py",
 ]
 
 load_dotenv()

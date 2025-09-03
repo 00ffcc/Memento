@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
+load_dotenv()
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import AsyncOpenAI
@@ -66,15 +67,15 @@ with open(f"../data/{TASK}.jsonl", "r") as f:
 
 server_paths: list[str] = [
     "../server/code_agent.py",
-    # "../server/ai_crawl.py",
-    # "../server/documents_tool.py",
-    # "../server/image_tool.py",
+    "../server/ai_crawl.py",
+    "../server/documents_tool.py",
+    "../server/image_tool.py",
     "../server/math_tool.py",
-    # "../server/serp_search.py",
-    # "../server/video_tool.py",
+    "../server/serp_search.py",
+    "../server/video_tool.py",
 ]
 
-load_dotenv()
+#load_dotenv()
 
 
 META_SYSTEM_PROMPT = (

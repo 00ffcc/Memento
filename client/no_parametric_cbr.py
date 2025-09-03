@@ -103,6 +103,7 @@ EXEC_SYSTEM_PROMPT = (
 )
 
 MEMORY_JSONL_PATH = os.getenv("MEMORY_JSONL_PATH", "../memory/dummy_memo.jsonl")
+MEMORY_JSONL_OUTPUT_PATH = os.getenv("MEMORY_JSONL_OUTPUT_PATH", "../memory/retrieved_memo.jsonl")
 MEMORY_KEY_FIELD = os.getenv("MEMORY_KEY_FIELD", "question")
 MEMORY_VALUE_FIELD = os.getenv("MEMORY_VALUE_FIELD", "plan")
 MEMORY_TOP_K = int(os.getenv("MEMORY_TOP_K", "8"))
@@ -431,6 +432,7 @@ class HierarchicalClient:
 
             # 执行任务
             tasks = json.loads(latest_plan_json)["plan"]
+            logger.info(f"{tasks=}")
             for task in tasks:
                 task_desc = f"Task {task['id']}: {task['description']}"
                 exec_msgs = (
@@ -440,6 +442,7 @@ class HierarchicalClient:
                 while True:
                     exec_msgs = trim_messages(exec_msgs, MAX_CTX)
                     exec_reply = await self.exec_llm.chat(exec_msgs, tools_schema)
+                    logger.info(f"{exec_reply=}")
                     if exec_reply["content"]:
                         result_text = str(exec_reply["content"])
                         executor_trace.append(ExecStep(task_id=task["id"], input=task_desc, output=result_text))
@@ -522,79 +525,82 @@ async def llm_judge(question: str, ground_truth: Any, pred_answer: str) -> Dict[
         logger.warning("LLM judge failed: %s", e)
         return {"judgement": "incorrect", "rationale": f"judge failed: {e}"}
 
+semaphore = asyncio.Semaphore(3)
+
+async def main_single(question, task_id, ground_truth):
+    async with semaphore:
+        
+        client = HierarchicalClient(
+            os.getenv("META_MODEL"),
+            os.getenv("EXEC_MODEL"),
+        )
+        await client.connect_to_servers(server_paths)
+
+        try:
+            rec = await client.process_query(question, task_id)
+
+            pred_answer = rec.model_output
+
+            judge_res = await llm_judge(question, ground_truth, pred_answer)
+            reward = 1 if judge_res["judgement"] == "correct" else 0
+
+            rec_dict = asdict(rec)
+            rec_dict.update({
+                "question": question,
+                "plan": rec.plan_json,             
+                "ground_truth": ground_truth,
+                "pred_answer": pred_answer,
+                "judgement": judge_res["judgement"],
+                "rationale": judge_res["rationale"],
+                "reward": reward,
+            })
+
+            print("\nFINAL ANSWER:", rec.model_output)
+
+        except Exception as e:
+            print(f"[ERROR]: {e}")
+            return None
+        
+        finally:
+            await client.cleanup()
+
+        return rec_dict
+        
 async def main():
     if not query_list:
         print("⚠️  query_list is empty – add questions to process.")
         return
 
-    finished_task = []
-    result_path = "../result/result_round_0.jsonl"
-    if os.path.exists(result_path):
-        with open(result_path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    record = json.loads(line)
-                    finished_task.append(record.get('query') or record.get('question'))
-                except Exception:
-                    continue
-
-    client = HierarchicalClient(
-        os.getenv("META_MODEL", "gpt-4.1"),
-        os.getenv("EXEC_MODEL", "o4-mini"),
-    )
-    await client.connect_to_servers(server_paths)
+    res = await asyncio.gather(*[main_single(q, i, ground_truth_map[q]) for i, q in enumerate(query_list)])
 
     try:
-        for task_id, q in enumerate(tqdm(query_list, total=len(query_list), desc="Processing"), start=0):
-            if q in finished_task:
-                print(f"Task {q} already finished, skipping...")
+        mem_path = MEMORY_JSONL_OUTPUT_PATH
+        os.makedirs(os.path.dirname(mem_path), exist_ok=True)
+
+        for rec in res:
+            if not rec:
                 continue
+            q = rec["question"]
+            reward = rec["reward"]
+            plan = rec["plan"]
+            mem_entry = {
+                "question": q,
+                "plan": plan,  
+                "reward": reward             
+            }
+            with open(mem_path, "a", encoding="utf-8") as mf:
+                mf.write(json.dumps(mem_entry, ensure_ascii=False) + "\n")
 
-            try:
-                rec = await client.process_query(q, task_id)
+        result_path = "../result/result_round_0.jsonl"
+        os.makedirs(os.path.dirname(result_path), exist_ok=True)
+        with open(result_path, "a", encoding="utf-8") as rf:
+            json.dump(res, rf, ensure_ascii=False)
 
-                pred_answer = rec.model_output
-                gt = ground_truth_map.get(q)
+    except Exception as e:
+        logger.warning("Failed to write memory file: %s", e)
 
-                judge_res = await llm_judge(q, gt, pred_answer)
-                reward = 1 if judge_res["judgement"] == "correct" else 0
-
-                rec_dict = asdict(rec)
-                rec_dict.update({
-                    "question": q,
-                    "plan": rec.plan_json,             
-                    "ground_truth": gt,
-                    "pred_answer": pred_answer,
-                    "judgement": judge_res["judgement"],
-                    "rationale": judge_res["rationale"],
-                    "reward": reward,
-                })
-
-                print("\nFINAL ANSWER:", rec.model_output)
-                with open(result_path, "a", encoding="utf-8") as fh:
-                    json_line = json.dumps(rec_dict, ensure_ascii=False, default=str)
-                    fh.write(json_line + "\n")
-
-            except Exception as e:
-                print(f"[ERROR]: {e}")
-                continue
-
-            try:
-                mem_path = MEMORY_JSONL_PATH  
-                os.makedirs(os.path.dirname(mem_path), exist_ok=True)
-
-                mem_entry = {
-                    "question": q,
-                    "plan": rec.plan_json or "",  
-                    "reward": reward             
-                }
-                with open(mem_path, "a", encoding="utf-8") as mf:
-                    mf.write(json.dumps(mem_entry, ensure_ascii=False) + "\n")
-            except Exception as e:
-                logger.warning("Failed to write memory file: %s", e)
+    print(f"正确率: {sum([r['reward'] for r in res if r])} // {len(res)}")
                 
-    finally:
-        await client.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
